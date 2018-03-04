@@ -1,1 +1,1 @@
-hello world
+repositório p/ estudos JS
