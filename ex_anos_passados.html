@@ -1,0 +1,16 @@
+<meta charset="UTF-8">
+<script>
+
+    function skipLine() {
+        document.write('<br>');
+    }
+    function print(text) {
+        document.write(text);
+        skipLine();
+    }
+    var anosPassados = 2018 - 1500
+    print(`De 1500 até hoje, já se passaram ${anosPassados} anos!`);
+    var geracoes = anosPassados / 28;
+    print(`No total, já existem ${Math.round(geracoes)} gerações de brasileiros!`);
+
+</script>
