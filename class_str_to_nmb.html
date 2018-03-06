@@ -8,10 +8,8 @@
         pulaLinha();
     }
 mostra('Vamos calcular os pontos do seu time!');
-var vitorias = prompt('Digite as vitórias: ');
-vitorias = parseInt(vitorias);
-var empates = prompt('Digite os empates: ');
-empates = parseInt(empates);
+var vitorias = parseInt(prompt('Digite as vitórias: '));
+var empates = parseInt(prompt('Digite os empates: '));
 var total = vitorias * 3 + empates;
 mostra(`O seu time tem ${total} pontos!`);
 
