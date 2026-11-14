@@ -51,6 +51,11 @@ button.link{border:0;background:none;box-shadow:none;font:600 13px var(--body);c
 button:disabled{opacity:.4;cursor:default}
 :focus-visible{outline:3px solid var(--fg);outline-offset:2px}
 .spacer{flex:1}
+.pane{flex:1;min-height:0;display:flex;flex-direction:column;gap:14px}
+.codebox{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;background:var(--panel);border:3px solid var(--edge);border-radius:8px;box-shadow:0 4px 0 var(--edge)}
+#codeShow{font:400 34px/1 var(--display);color:var(--hot);letter-spacing:.14em;margin-right:-.14em}
+#code{font:400 20px/1 var(--display);letter-spacing:.2em;text-transform:uppercase;text-align:center}
+#code::placeholder{font:400 20px/1 var(--display);color:var(--line)}
 
 /* play HUD */
 #chips{display:grid;grid-template-columns:repeat(8,minmax(0,40px));gap:6px}
@@ -93,19 +98,26 @@ button:disabled{opacity:.4;cursor:default}
     <div class="marquee" aria-hidden="true"><i style="--c:var(--p0);--i:0"></i><i style="--c:var(--p1);--i:1"></i><i style="--c:var(--p2);--i:2"></i><i style="--c:var(--p3);--i:3"></i><i style="--c:var(--p4);--i:4"></i><i style="--c:var(--p5);--i:5"></i></div>
     <p class="lead"><b>Decore as luzes e repita.</b> Todos jogam ao mesmo tempo. Errou, saiu. A sequência cresce até sobrar um.</p>
     <p class="note" id="note" hidden></p>
-    <div class="label"><span>Jogadores</span><span id="count">0/8</span></div>
-    <div id="roster"></div>
-    <p id="hint">Conectando à sala…</p>
-    <div class="spacer"></div>
-    <form class="row" id="joinForm">
-      <input id="nick" maxlength="14" placeholder="Seu apelido" autocomplete="off" aria-label="Seu apelido">
-      <button class="go" id="join" disabled>Entrar</button>
-    </form>
-    <div class="row" id="hostRow" hidden>
-      <button class="go" id="start">Começar</button>
-      <button class="ghost" id="leave">Sair</button>
+    <div class="pane" id="home">
+      <div class="row"><input id="nick" maxlength="14" placeholder="Seu apelido" autocomplete="off" aria-label="Seu apelido"></div>
+      <div class="row"><button class="go" id="create" disabled>Criar sala</button></div>
+      <div class="label" id="orLabel"><span>Ou entre com um código</span></div>
+      <form class="row" id="joinForm">
+        <input id="code" maxlength="4" placeholder="ABCD" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Código da sala">
+        <button id="join" disabled>Entrar</button>
+      </form>
     </div>
-    <button class="link" id="reset" hidden>Esvaziar a sala</button>
+    <div class="pane" id="room" hidden>
+      <div class="codebox"><span class="label">Código da sala</span><strong id="codeShow"></strong></div>
+      <div class="label"><span>Jogadores</span><span id="count">0/8</span></div>
+      <div id="roster"></div>
+      <p id="hint"></p>
+      <div class="spacer"></div>
+      <div class="row">
+        <button class="go" id="start">Começar</button>
+        <button class="ghost" id="leave">Sair</button>
+      </div>
+    </div>
   </section>
 
   <section id="play" hidden>
@@ -138,17 +150,20 @@ button:disabled{opacity:.4;cursor:default}
 <script>
 (function(){
 const $=id=>document.getElementById(id);
-const MAX=8, LEAD=2200, GAP=160, DEFAULT={phase:'lobby',lid:'sala'};
+const MAX=8, LEAD=2200, GAP=160, DEFAULT={phase:'lobby',v:0};
 const FREQ=[261.6,329.6,392,440,523.3,659.3];
 const COLORS=['--p0','--p1','--p2','--p3','--p4','--p5'];
+const ALPHA='ABCDEFGHJKLMNPQRSTUVWXYZ';
 const stepOn=n=>Math.max(240,520-18*n);
 const inputMs=n=>4000+n*1300;
 const newId=()=>Math.random().toString(36).slice(2,10);
 const rnd=()=>Math.floor(Math.random()*6);
 
-let db=null,me=null,offline=false,ready=false;
-let state=DEFAULT,players={},myDoc=null,chain=Promise.resolve();
-let L={rid:null,mode:'idle',idx:0,res:null,why:''},timers=[],inputTimer=null,resolved=null;
+/* Transport: everything travels in each phone's live presence. Mine carries my nickname, room code and answer;
+   the host's also carries the game state (g). Nothing is stored: a room exists while people are in it. */
+let room=null,me=null,offline=false,ready=false,code=null;
+let state=DEFAULT,players={},myDoc=null;
+let L={rid:null,mode:'idle',idx:0,res:null,why:'',deadlineAt:0},timers=[],inputTimer=null,resolved=null;
 
 /* ---------- sound ---------- */
 let ac=null;
@@ -164,40 +179,59 @@ function flash(p,ms){const el=padEls[p];el.classList.add('on');tone(FREQ[p],ms);
 let toastT;function toast(m){const t=$('toast');t.textContent=m;t.hidden=false;clearTimeout(toastT);toastT=setTimeout(()=>t.hidden=true,2600);}
 const later=(fn,ms)=>{const t=setTimeout(fn,ms);timers.push(t);return t;};
 function clearTimers(){timers.forEach(clearTimeout);timers=[];clearTimeout(inputTimer);inputTimer=null;}
-const nickOf=u=>(players[u]&&players[u].nick)||'Jogador';
-const roomIds=()=>Object.keys(players).filter(u=>players[u].lobby===state.lid).sort((a,b)=>(players[a].joinedAt||0)-(players[b].joinedAt||0));
-const joined=()=>!!me&&!!players[me]&&players[me].lobby===state.lid;
-const colorOf=u=>{const i=roomIds().indexOf(u);return 'var('+COLORS[(i<0?0:i)%6]+')';};
+const nickOf=u=>(players[u]&&players[u].nick)||(state.names&&state.names[u])||'Jogador';
+const ini=u=>nickOf(u).slice(0,2).toUpperCase();
+const roomIds=()=>Object.keys(players).sort((a,b)=>(players[a].joinedAt-players[b].joinedAt)||(a<b?-1:1));
+const colorOf=u=>{const l=state.phase!=='lobby'&&state.ids?state.ids:roomIds(),i=l.indexOf(u);return 'var('+COLORS[(i<0?0:i)%6]+')';};
+const answered=(u,rid)=>players[u]&&players[u].rid===rid&&players[u].res;
+function valid(g){return g&&typeof g==='object'&&typeof g.v==='number'&&(g.phase==='lobby'||((g.phase==='play'||g.phase==='over')&&
+  Array.isArray(g.seq)&&g.seq.length<200&&g.seq.every(x=>x===(x|0)&&x>=0&&x<6)&&Array.isArray(g.alive)&&Array.isArray(g.out)&&Array.isArray(g.ids)));}
+function others(c){return room?room.peers().filter(x=>x.kind==='viewer'&&!(x.isMe&&x.sameTab)&&x.presence&&x.presence.code===c):[];}
 
-/* ---------- storage ---------- */
-function writeState(s){if(offline){onState(s);return;}
-  db.doc('game/state').set(s).catch(()=>{resolved=null;toast('Não deu para salvar. Tente de novo.');});}
-function saveMe(patch){myDoc=Object.assign({},myDoc||{},patch);const body=Object.assign({},myDoc);
-  if(offline){players=Object.assign({},players,{[me]:body});onPlayers();return;}
-  chain=chain.then(()=>db.doc('players/'+me).set(body)).catch(()=>toast('Não deu para salvar sua jogada.'));}
-function removeMe(){myDoc=null;
-  if(offline){const p=Object.assign({},players);delete p[me];players=p;onPlayers();return;}
-  chain=chain.then(()=>db.doc('players/'+me).delete()).catch(()=>{});}
-
+/* ---------- transport ---------- */
+function saveMe(patch){myDoc=Object.assign({},myDoc||{},patch);
+  if(!offline)room.presence(patch).catch(()=>toast('Não deu para enviar. Verifique a conexão.'));
+  recompute();}
+function writeState(s){s.v=(state.v||0)+1;s.host=me;
+  if(offline){onState(s);return;}
+  saveMe({g:s});}
+function recompute(){
+  const p={};let best=null,bp=null;
+  const see=(peer,g)=>{if(g&&g.host===peer&&valid(g)&&(!best||g.v>best.v||(g.v===best.v&&peer>bp))){best=g;bp=peer;}};
+  if(code){
+    others(code).forEach(x=>{const pr=x.presence;p[x.peer]={nick:String(pr.nick||'Jogador').slice(0,14),joinedAt:+pr.joinedAt||0,rid:pr.rid,res:pr.res};see(x.peer,pr.g);});
+    if(me&&myDoc){p[me]={nick:myDoc.nick,joinedAt:myDoc.joinedAt,rid:myDoc.rid,res:myDoc.res};see(me,myDoc.g);}
+  }
+  players=p;
+  if(!offline&&code){
+    if(best){
+      if(bp!==me&&myDoc&&myDoc.g){myDoc.g=null;room.presence({g:null}).catch(()=>{});}
+      if(best.v!==state.v||best.host!==state.host){onState(best);return;}
+    }else if(state.phase==='play'&&roomIds()[0]===me){ /* the host left mid-game: the longest-standing player takes over */
+      const g=Object.assign({},state,{host:me,v:(state.v||0)+1});state=g;
+      later(()=>tryResolve(true),Math.max(0,L.deadlineAt-Date.now()));
+      saveMe({g:g});return;
+    }
+  }
+  render();tryResolve(false);
+}
 function onState(s){state=s||DEFAULT;
   if(state.phase==='play'){if(state.rid!==L.rid)beginRound();else render();}
-  else{clearTimers();L={rid:null,mode:'idle',idx:0,res:null,why:''};render();}}
-function onPlayers(){if(!myDoc&&me&&players[me])myDoc=Object.assign({},players[me]);render();tryResolve(false);}
+  else{clearTimers();L={rid:null,mode:'idle',idx:0,res:null,why:'',deadlineAt:0};render();}}
 
 /* ---------- round engine (every phone runs it; the host's phone decides who survives) ---------- */
 function beginRound(){
   clearTimers();const s=state,n=s.seq.length,on=stepOn(n),showMs=n*(on+GAP),alive=s.alive.includes(me);
-  const mine=players[me];
-  L={rid:s.rid,mode:'lead',idx:0,res:null,why:''};
-  if(alive&&mine&&mine.rid===s.rid&&mine.res){L.mode='done';L.res=mine.res;}
+  const deadline=LEAD+showMs+inputMs(n)+4000;
+  L={rid:s.rid,mode:'lead',idx:0,res:null,why:'',deadlineAt:Date.now()+deadline};
+  if(alive&&answered(me,s.rid)){L.mode='done';L.res=players[me].res;}
   else later(()=>{L.mode='show';render();
     s.seq.forEach((p,i)=>later(()=>flash(p,on),i*(on+GAP)));
     later(()=>{if(alive){L.mode='input';render();startBar(inputMs(n));inputTimer=setTimeout(()=>finish('fail','time'),inputMs(n));}
       else{L.mode='watch';render();}},showMs);
   },LEAD);
-  const deadline=LEAD+showMs+inputMs(n)+4000;
   later(()=>{if(state.rid===s.rid&&state.host===me)tryResolve(true);},deadline);
-  later(()=>{if(state.rid===s.rid&&state.phase==='play'&&state.host!==me&&joined()){state=Object.assign({},state,{host:me});tryResolve(true);}},deadline+5000+Math.random()*4000);
+  later(()=>{if(state.rid===s.rid&&state.phase==='play'&&state.host!==me&&players[me]){state=Object.assign({},state,{host:me});tryResolve(true);}},deadline+5000+Math.random()*4000);
   render();tryResolve(false);
 }
 function startBar(ms){const b=$('bar').firstElementChild;b.style.transition='none';b.style.width='100%';void b.offsetWidth;b.style.transition='width '+ms+'ms linear';b.style.width='0';}
@@ -206,64 +240,63 @@ function finish(res,why){if(L.mode!=='input')return;clearTimeout(inputTimer);inp
   L.mode='done';L.res=res;L.why=why||'';
   if(res==='fail'){tone(110,450,'sawtooth');try{navigator.vibrate&&navigator.vibrate(250);}catch(e){}}
   else later(()=>{tone(784,120);later(()=>tone(1047,180),120);},250);
-  saveMe({rid:state.rid,res:res});render();}
+  saveMe({rid:state.rid,res:res});}
 function press(p){if(L.mode!=='input')return;flash(p,200);
   if(p!==state.seq[L.idx]){finish('fail','wrong');return;}
-  L.idx++;if(L.idx===state.seq.length)finish('ok');}
+  L.idx++;if(L.idx===state.seq.length)finish('ok');else render();}
 
 function tryResolve(force){const s=state;
   if(s.phase!=='play'||s.host!==me||resolved===s.rid)return;
-  const ok=s.alive.filter(u=>players[u]&&players[u].rid===s.rid&&players[u].res==='ok');
-  const answered=s.alive.filter(u=>players[u]&&players[u].rid===s.rid&&players[u].res).length;
-  if(!force&&answered<s.alive.length)return;
+  const ok=s.alive.filter(u=>answered(u,s.rid)==='ok');
+  /* someone who left the room counts as having answered wrong */
+  if(!force&&s.alive.some(u=>players[u]&&!answered(u,s.rid)))return;
   resolved=s.rid;
   const failed=s.alive.filter(u=>!ok.includes(u));
-  const base={lid:s.lid,gid:s.gid,host:me,n0:s.n0,out:s.out.slice()};
+  const base={gid:s.gid,n0:s.n0,ids:s.ids,names:s.names,seq:s.seq,out:s.out.slice()};
   let next;
   if(s.alive.length>1&&ok.length===0)
-    next=Object.assign(base,{phase:'play',round:s.round,rid:newId(),seq:s.seq,alive:s.alive,last:{tie:true,failed:[]}});
+    next=Object.assign(base,{phase:'play',round:s.round,rid:newId(),alive:s.alive,last:{tie:true,failed:[]}});
   else{
     failed.forEach(u=>base.out.push({u:u,r:s.round}));
     if(ok.length===0||(s.alive.length>1&&ok.length===1))
       next=Object.assign(base,{phase:'over',round:s.round,alive:ok,winner:s.n0>1?(ok[0]||null):null});
     else next=Object.assign(base,{phase:'play',round:s.round+1,rid:newId(),seq:s.seq.concat(rnd()),alive:ok,last:{failed:failed}});
   }
-  setTimeout(()=>writeState(next),1100);
+  setTimeout(()=>{if(state.rid===s.rid&&state.host===me)writeState(next);else resolved=null;},1100);
 }
 
 /* ---------- render ---------- */
-const ini=u=>nickOf(u).slice(0,2).toUpperCase();
 function li(u,tag,pos){const el=document.createElement('li'),d=document.createElement('span'),n=document.createElement('span');
   d.className='av';d.textContent=pos;n.className='nm';n.textContent=nickOf(u)+(u===me?' (você)':'');el.append(d,n);
   if(tag){const t=document.createElement('span');t.className='tag';t.textContent=tag;el.append(t);}return el;}
 function render(){
-  const ids=roomIds(),inRoom=joined(),ph=state.phase;
-  const screen=(ph==='lobby'||!inRoom)?'lobby':ph;
+  const ids=roomIds(),ph=state.phase,screen=!code||ph==='lobby'?'lobby':ph;
   $('lobby').hidden=screen!=='lobby';$('play').hidden=screen!=='play';$('over').hidden=screen!=='over';
-  $('roundTag').textContent=ph==='play'?'Rodada '+state.round:(offline?'Treino':'');
+  $('roundTag').textContent=code&&ph==='play'?'Rodada '+state.round:code&&!offline?code:offline?'Treino':'';
   if(screen==='lobby'){
-    $('count').textContent=ids.length+'/'+MAX;
-    const r=$('roster');r.textContent='';
-    for(let k=0;k<MAX;k++){const u=ids[k],el=document.createElement('div'),a=document.createElement('span'),n=document.createElement('span');
-      el.className='slot'+(u?' full':'');a.className='av';a.textContent=u?ini(u):k+1;if(u)a.style.setProperty('--c',colorOf(u));
-      n.className='nm';n.textContent=u?nickOf(u)+(u===me?' (você)':''):'Livre';el.append(a,n);r.append(el);}
-    $('hint').textContent=!ready?'Conectando à sala…':!ids.length?'Sala vazia. Entre e chame o pessoal.':ids.length===1&&inRoom?'Esperando mais gente, ou treine sozinho.':'';
-    $('joinForm').hidden=inRoom;$('hostRow').hidden=!inRoom;
-    $('join').disabled=!ready;
-    $('start').textContent=ids.length>1?'Começar com '+ids.length:'Treinar sozinho';
-    $('reset').hidden=offline||!ready||ph!=='lobby'||ids.length===0;
-    if(ph!=='lobby'&&!inRoom)setNote('Tem uma partida em andamento. Entre agora para jogar a próxima.');
-    else if(!offline&&$('note').dataset.auto)setNote('');
+    $('home').hidden=!!code;$('room').hidden=!code;
+    $('create').disabled=$('join').disabled=!ready;
+    $('create').textContent=offline?'Treinar sozinho':'Criar sala';
+    $('orLabel').hidden=$('joinForm').hidden=offline;
+    if(code){
+      $('codeShow').textContent=offline?'—':code;$('count').textContent=ids.length+'/'+MAX;
+      const r=$('roster');r.textContent='';
+      for(let k=0;k<MAX;k++){const u=ids[k],el=document.createElement('div'),a=document.createElement('span'),n=document.createElement('span');
+        el.className='slot'+(u?' full':'');a.className='av';a.textContent=u?ini(u):k+1;if(u)a.style.setProperty('--c',colorOf(u));
+        n.className='nm';n.textContent=u?nickOf(u)+(u===me?' (você)':''):'Livre';el.append(a,n);r.append(el);}
+      $('hint').textContent=offline?'':ids.length<2?'Passe o código '+code+' para o pessoal. Quem abrir este mesmo link digita o código e entra.':'Qualquer um da sala pode começar.';
+      $('start').textContent=ids.length>1?'Começar com '+Math.min(ids.length,MAX):'Treinar sozinho';
+    }
   }
   if(screen==='play')renderPlay();
   if(screen==='over')renderOver();
 }
-function setNote(m,sticky){const n=$('note');if(n.dataset.sticky&&!sticky)return;n.textContent=m;n.hidden=!m;if(sticky)n.dataset.sticky='1';else n.dataset.auto='1';}
+function setNote(m){const n=$('note');n.textContent=m;n.hidden=!m;}
 function renderPlay(){
   const s=state,c=$('chips');c.textContent='';
   const all=s.alive.concat(s.out.map(o=>o.u).reverse());
   all.forEach(u=>{const d=document.createElement('span'),i=document.createElement('i');
-    const p=players[u],out=!s.alive.includes(u),res=!out&&p&&p.rid===s.rid?p.res:null;
+    const out=!s.alive.includes(u),res=!out&&answered(u,s.rid)||null;
     d.className='chip'+(out?' out':res?' '+res:'')+(u===me?' me':'');d.textContent=ini(u);d.title=nickOf(u);d.style.setProperty('--c',colorOf(u));
     i.textContent=res==='ok'?'✓':res==='fail'?'✕':'';d.append(i);c.append(d);});
   const alive=s.alive.includes(me),n=s.seq.length;let h='',sub='';
@@ -293,37 +326,43 @@ function renderOver(){
 
 /* ---------- controls ---------- */
 padEls.forEach(el=>el.addEventListener('pointerdown',e=>{e.preventDefault();wake();press(+el.dataset.p);}));
-$('joinForm').addEventListener('submit',e=>{e.preventDefault();wake();if(!ready)return;
-  if(roomIds().length>=MAX){toast('Sala cheia: já são 8.');return;}
-  const nick=$('nick').value.trim().slice(0,14)||'Jogador '+(roomIds().length+1);
+const cleanCode=v=>v.toUpperCase().replace(/[^A-Z]/g,'').slice(0,4);
+function enter(c){wake();if(!ready||!me)return;
+  if(!offline&&others(c).length>=MAX){toast('Sala '+c+' cheia: já são 8.');return;}
+  const nick=$('nick').value.trim().slice(0,14)||'Jogador '+(others(c).length+1);
   try{localStorage.setItem('eco-nick',nick);}catch(e){}
-  saveMe({nick:nick,lobby:state.lid,joinedAt:Date.now(),rid:null,res:null});});
-$('start').addEventListener('click',()=>{wake();if(state.phase!=='lobby'||!joined())return;
-  const ids=roomIds().slice(0,MAX);resolved=null;
-  writeState({phase:'play',lid:state.lid,gid:newId(),host:me,n0:ids.length,round:1,rid:newId(),seq:[rnd(),rnd()],alive:ids,out:[],last:null});});
-$('again').addEventListener('click',()=>{wake();writeState({phase:'lobby',lid:state.lid});});
-$('leave').addEventListener('click',removeMe);$('leave2').addEventListener('click',removeMe);
-let armed=0;$('reset').addEventListener('click',()=>{const b=$('reset');
-  if(Date.now()-armed>3000){armed=Date.now();b.textContent='Toque de novo para tirar todos da sala';setTimeout(()=>b.textContent='Esvaziar a sala',3000);return;}
-  armed=0;b.textContent='Esvaziar a sala';myDoc=null;writeState({phase:'lobby',lid:newId()});});
+  try{if(!offline)location.hash='sala-'+c.toLowerCase();}catch(e){}
+  code=c;state=DEFAULT;resolved=null;myDoc=null;
+  saveMe({nick:nick,code:c,joinedAt:Date.now(),rid:null,res:null,g:null});}
+function leave(){clearTimers();code=null;state=DEFAULT;L={rid:null,mode:'idle',idx:0,res:null,why:'',deadlineAt:0};
+  try{history.replaceState(null,'',location.pathname+location.search);}catch(e){}
+  saveMe({code:null,g:null,rid:null,res:null});}
+$('create').addEventListener('click',()=>{let c;do{c='';for(let i=0;i<4;i++)c+=ALPHA[Math.floor(Math.random()*ALPHA.length)];}while(!offline&&others(c).length);enter(c);});
+$('code').addEventListener('input',()=>{$('code').value=cleanCode($('code').value);});
+$('joinForm').addEventListener('submit',e=>{e.preventDefault();const c=cleanCode($('code').value);
+  if(c.length<4){toast('O código tem 4 letras.');return;}
+  if(ready&&!others(c).length){toast('Não achei ninguém na sala '+c+'. Confira o código.');return;}
+  enter(c);});
+$('start').addEventListener('click',()=>{wake();if(state.phase!=='lobby'||!players[me])return;
+  const ids=roomIds().slice(0,MAX),names={};ids.forEach(u=>names[u]=nickOf(u));resolved=null;
+  writeState({phase:'play',gid:newId(),n0:ids.length,ids:ids,names:names,round:1,rid:newId(),seq:[rnd(),rnd()],alive:ids,out:[],last:null});});
+$('again').addEventListener('click',()=>{wake();writeState({phase:'lobby'});});
+$('leave').addEventListener('click',leave);$('leave2').addEventListener('click',leave);
 try{$('nick').value=localStorage.getItem('eco-nick')||'';}catch(e){}
+try{const h=/^#sala-([a-z]{4})$/i.exec(location.hash);if(h)$('code').value=h[1].toUpperCase();}catch(e){}
 
 /* ---------- boot ---------- */
-function goOffline(msg){offline=true;ready=true;me='eu';players={};state=DEFAULT;setNote(msg,true);render();}
+function goOffline(msg){clearTimers();offline=true;ready=true;me='eu';code=null;myDoc=null;players={};state=DEFAULT;setNote(msg);render();}
 async function boot(){
   const use=window.claude&&window.claude.use;
-  if(!use){goOffline('Modo treino: aberta fora do Claude, a sala compartilhada não está disponível.');return;}
-  const [d,user]=await Promise.all([use('db'),use('user')]);
-  const id=user?await user.id():null;
-  if(!d||!id){goOffline('Modo treino: entre na sua conta do Claude para jogar com os outros.');return;}
-  if((await user.can('data.write'))===false){goOffline('Modo treino: você só tem acesso de leitura. Peça acesso de Colaborador a quem compartilhou para entrar na sala.');return;}
-  db=d;me=id;
-  if(!$('nick').value){const m=await user.me();$('nick').value=(m.name||'').split(' ')[0].slice(0,14);}
-  let gotS=false,gotP=false;const mark=()=>{if(gotS&&gotP&&!ready){ready=true;clearTimeout(slow);if(!$('note').dataset.sticky)setNote('');render();}};
-  const slow=setTimeout(()=>{if(!ready)setNote('A sala ainda não respondeu. Verifique sua conexão.');},10000);
-  const dead=()=>{clearTimeout(slow);if(!ready)goOffline('Modo treino: não foi possível abrir a sala.');else toast('A conexão com a sala caiu.');};
-  db.doc('game/state').onSnapshot(s=>{gotS=true;mark();onState(s.exists?s.data():null);},dead);
-  db.collection('players').onSnapshot(q=>{const p={};q.docs.forEach(x=>p[x.id]=x.data());players=p;gotP=true;mark();onPlayers();},dead);
+  if(!use){goOffline('Modo treino: aberta fora do Claude, as salas não estão disponíveis.');return;}
+  const r=await use('room');
+  if(!r){goOffline('Modo treino: as salas não funcionam nesta visualização. Cada jogador precisa estar logado no Claude e ter sido convidado para este jogo (link público não serve).');return;}
+  room=r;
+  const slow=setTimeout(()=>{if(!ready)setNote('As salas ainda não responderam. Verifique sua conexão.');},10000);
+  room.onPeers(ch=>{const m=ch.peers.find(p=>p.isMe&&p.sameTab);
+    if(m){me=m.peer;if(!ready){ready=true;clearTimeout(slow);setNote('');}}
+    recompute();},()=>{clearTimeout(slow);goOffline('Modo treino: a conexão com as salas foi encerrada.');});
 }
 render();boot();
 })();
